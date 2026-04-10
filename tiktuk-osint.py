@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
 """
-TikTok OSINT Advanced Tool - Gather all TikTok account information
-Built for Kali Linux / Kali NetHunter (Termux)
+tiktuk-osint – Advanced TikTok OSINT Tool
+Designed for Kali Linux / Kali NetHunter (Termux)
 """
 
 import os
@@ -23,29 +23,64 @@ VERSION = "1.0"
 
 def banner():
     print(Fore.CYAN + "=" * 70)
-    print(Fore.CYAN + " TikTok OSINT Advanced - Advanced TikTok Information Gathering Tool")
+    print(Fore.CYAN + " tiktuk-osint – Advanced TikTok OSINT Tool")
     print(Fore.CYAN + " " * 20 + f"Version: {VERSION}")
     print(Fore.CYAN + "=" * 70)
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Advanced TikTok OSINT Tool")
-    parser.add_argument("-u", "--username", required=True, help="TikTok username to investigate")
-    parser.add_argument("-f", "--file", help="File containing list of TikTok usernames")
-    parser.add_argument("-o", "--output", help="Output file in CSV/JSON/HTML")
-    parser.add_argument("-r", "--report", action="store_true", help="Generate complete report (JSON + CSV + HTML)")
-    parser.add_argument("-p", "--proxy", help="Proxy server (http://proxy:port)")
-    parser.add_argument("-t", "--tor", action="store_true", help="Use Tor proxy for anonymity")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
+    parser = argparse.ArgumentParser(
+        description="Advanced TikTok OSINT Tool: Extract account information and OSINT data"
+    )
+    parser.add_argument(
+        "-u", "--username", required=True,
+        help="TikTok username to investigate (e.g. selcherbny)"
+    )
+    parser.add_argument(
+        "-f", "--file",
+        help="File containing list of TikTok usernames (one per line)"
+    )
+    parser.add_argument(
+        "-o", "--output",
+        help="Output file (CSV/JSON/HTML). Example: tiktok_results.csv"
+    )
+    parser.add_argument(
+        "-r", "--report",
+        action="store_true",
+        help="Generate a complete report (JSON + CSV + HTML)"
+    )
+    parser.add_argument(
+        "-p", "--proxy",
+        help="Proxy server (e.g. http://127.0.0.1:8080)"
+    )
+    parser.add_argument(
+        "-t", "--tor",
+        action="store_true",
+        help="Use Tor (requires torsocks or SOCKS5 on 127.0.0.1:9050)"
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Verbose output"
+    )
     return parser.parse_args()
 
 def get_tiktok_profile(username, tor=False, proxy=None, verbose=False):
+    """
+    Scrape TikTok profile for:
+    - email, phone, website
+    - followers, likes, videos (if available in HTML)
+    - creation date, region, language (basic extraction)
+    """
     base_url = f"https://www.tiktok.com/@{username}"
 
     if tor:
-        import socks
-        import socket
-        socks.set_default_proxy(socks.SOCKS5, "127.0.0.1", 9050)
-        socket.socket = socks.socksocket
+        try:
+            import socks
+            import socket
+            socks.set_default_proxy(socks.SOCKS5, "127.0.0.1", 9050)
+            socket.socket = socks.socksocket
+        except ImportError:
+            print(Fore.RED + "[-] socks module not installed; run: pip3 install PySocks")
 
     if proxy:
         proxies = {"http": proxy, "https": proxy}
@@ -58,13 +93,14 @@ def get_tiktok_profile(username, tor=False, proxy=None, verbose=False):
         "Accept-Language": "en-US,en;q=0.5",
         "Accept-Encoding": "gzip, deflate",
         "Connection": "keep-alive",
+        "Referer": "https://www.tiktok.com/",
     }
 
     if verbose:
         print(Fore.YELLOW + f"[+] Scraping TikTok profile for: {username}")
 
     try:
-        response = requests.get(base_url, headers=headers, proxies=proxies, timeout=10)
+        response = requests.get(base_url, headers=headers, proxies=proxies, timeout=15)
     except Exception as e:
         print(Fore.RED + f"[-] Error connecting to TikTok: {e}")
         return None
@@ -72,21 +108,20 @@ def get_tiktok_profile(username, tor=False, proxy=None, verbose=False):
     if response.status_code == 200:
         soup = BeautifulSoup(response.text, "html.parser")
 
-        # 1. Email from bio
+        # 1. Email
         email = re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+.[a-zA-Z]{2,}", soup.text)
         email = email[0] if email else None
 
-        # 2. Phone number from bio
+        # 2. Phone number
         phone = re.findall(r"+?d{9,15}", soup.text)
         phone = phone[0] if phone else None
 
-        # 3. Website / external links
-        links = re.findall(r"https?://[^"']+", soup.text[:3000])
+        # 3. External links (website)
+        links = re.findall(r"https?://[^'"<> ]+", soup.text[:3000])
         website = [ln for ln in links if "tiktok.com" not in ln]
         website = website[0] if website else None
 
-        # 4. Followers, likes, videos, interactive videos (advanced)
-        # Note: TikTok may change HTML structure, so selectors may change
+        # 4. Account info (basic extraction)
         followers = None
         likes = None
         videos = None
@@ -95,17 +130,23 @@ def get_tiktok_profile(username, tor=False, proxy=None, verbose=False):
         language = None
         interactive_videos = None
 
-        # 5. Try to find followers, likes, videos
-        # Use possible text matches or class names (TikTok may change)
-        # Example:
-        # followers_text = re.search(r"Followers:s*(d+)", soup.text)
-        # if followers_text:
-        #     followers = followers_text.group(1)
+        # 5. Try to find followers, likes, videos (TikTok HTML may change)
+        # You can adjust these regex patterns later:
+        followers_text = re.search(r"Followerss*[:s]*(S+)", soup.text, re.IGNORECASE)
+        if followers_text:
+            followers = followers_text.group(1)
 
-        # 6. Basic profile info (for now, we keep it)
+        likes_text = re.search(r"Likess*[:s]*(S+)", soup.text, re.IGNORECASE)
+        if likes_text:
+            likes = likes_text.group(1)
+
+        videos_text = re.search(r"Videoss*[:s]*(S+)", soup.text, re.IGNORECASE)
+        if videos_text:
+            videos = videos_text.group(1)
+
+        # 6. Basic profile object
         profile = {
             "username": username,
-            "uid": None,  # Could be extracted from JSON if available
             "followers": followers,
             "likes": likes,
             "videos": videos,
@@ -120,7 +161,7 @@ def get_tiktok_profile(username, tor=False, proxy=None, verbose=False):
         }
 
         if verbose:
-            print(Fore.GREEN + f"[+] Profile scraped successfully for: {username}")
+            print(Fore.GREEN + f"[+] Profile scraped for: {username}")
 
         return profile
 
@@ -149,32 +190,34 @@ def write_report_html(data):
     if not data:
         return
 
-    html_report = "<!DOCTYPE html><html><head><title>TikTok OSINT Report</title><style>
-" \
-                  "body { font-family: Arial, sans-serif; margin: 20px; }
-" \
-                  "table { border-collapse: collapse; width: 100%; }
-" \
-                  "th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-" \
-                  "th { background-color: #f2f2f2; }
-" \
-                  "</style></head><body><h1>TikTok OSINT Report</h1><table><tr>"
-
+    table_start = "<table border='1' cellpadding='5' cellspacing='0'>"
+    header = "<thead><tr>"
     for key in data[0].keys():
-        html_report += f"<th>{key}</th>"
-    html_report += "</tr>"
+        header += f"<th>{key}</th>"
+    header += "</tr></thead>"
 
+    rows = "<tbody>"
     for row in data:
-        html_report += "<tr>"
+        rows += "<tr>"
         for key in row.keys():
-            html_report += f"<td>{row[key]}</td>"
-        html_report += "</tr>"
-    html_report += "</table></body></html>"
+            rows += f"<td>{row[key]}</td>"
+        rows += "</tr>"
+    rows += "</tbody></table>"
 
-    filename = "tiktok_osint_advanced_report.html"
+    html = f"""
+    <!DOCTYPE html><html><head>
+    <title>TikTok OSINT Report – tiktuk-osint</title>
+    <style>body {{ font-family: Arial, sans-serif; margin: 20px; }}
+    th {{ background-color: #f2f2f2; text-align: left; padding: 8px; }}
+    td {{ padding: 6px; }}table {{ border-collapse: collapse; width: 100%; }}
+    </style></head><body><h1>TikTok OSINT Report</h1>
+    {table_start}{header}{rows}
+    </body></html>
+    """
+
+    filename = "tiktuk-osint_report.html"
     with open(filename, "w", encoding="utf-8") as file:
-        file.write(html_report)
+        file.write(html)
     print(Fore.GREEN + f"[+] HTML report written to: {filename}")
 
 def main():
@@ -183,7 +226,12 @@ def main():
 
     # Single username
     if args.username:
-        profile = get_tiktok_profile(args.username, args.tor, args.proxy, args.verbose)
+        profile = get_tiktok_profile(
+            username=args.username,
+            tor=args.tor,
+            proxy=args.proxy,
+            verbose=args.verbose
+        )
         if profile:
             print(Fore.GREEN + "
 " + "-" * 50)
@@ -195,17 +243,22 @@ def main():
             if args.output:
                 write_json([profile], args.output)
             elif args.report:
-                write_json([profile], "tiktok_osint_advanced_results.json")
+                write_json([profile], "tiktok_osint_results.json")
                 write_report_html([profile])
 
     # Multiple usernames from file
     if args.file:
         all_profiles = []
-        with open(args.file, "r") as file:
+        with open(args.file, "r", encoding="utf-8") as file:
             usernames = [line.strip() for line in file if line.strip()]
 
         for username in usernames:
-            profile = get_tiktok_profile(username, args.tor, args.proxy, args.verbose)
+            profile = get_tiktok_profile(
+                username=username,
+                tor=args.tor,
+                proxy=args.proxy,
+                verbose=args.verbose
+            )
             if profile:
                 all_profiles.append(profile)
 
@@ -215,8 +268,8 @@ def main():
             elif args.output and args.output.endswith(".json"):
                 write_json(all_profiles, args.output)
             elif args.report:
-                write_csv(all_profiles, "tiktok_osint_advanced_results.csv")
-                write_json(all_profiles, "tiktok_osint_advanced_results.json")
+                write_csv(all_profiles, "tiktok_osint_results.csv")
+                write_json(all_profiles, "tiktok_osint_results.json")
                 write_report_html(all_profiles)
 
 if __name__ == "__main__":
