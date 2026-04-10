@@ -71,13 +71,13 @@ chmod +x tiktok_osint_advanced.py
 python3 tiktok_osint_advanced.py -u selcherbny -v
 ```
 
-- `-u selcherbny` – اسم المستخدم في TikTok  
+- `-u usernam` – اسم المستخدم في TikTok  
 - `-v` – تفصيل النتائج (Verbose)
 
 سيظهر لك:
 
 ```text
-Username: selcherbny
+Username: username
 UID: 123456789 (إن وُجد)
 Followers: 12000
 Likes: 85000
@@ -86,7 +86,7 @@ Creation Date: 2022-01-15
 Region: Amman, Jordan
 Language: English
 Interactive Videos: 80
-Email: selcherbny@gmail.com
+Email: email@gmail.com
 Phone: +96278xxxxxxx
 Website: https://example.com/contact
 ```
@@ -96,10 +96,10 @@ Website: https://example.com/contact
 #### 3.2 حفظ النتائج في JSON
 
 ```bash
-python3 tiktok_osint_advanced.py -u selcherbny -o selcherbny_result.json -v
+python3 tiktok_osint_advanced.py -u username -o username.json -v
 ```
 
-- `-o selcherbny_result.json` – حفظ في JSON  
+- `-o username_result.json` – حفظ في JSON  
 - `-v` – تفصيل النتائج
 
 ***
@@ -107,7 +107,7 @@ python3 tiktok_osint_advanced.py -u selcherbny -o selcherbny_result.json -v
 #### 3.3 استخدام Tor للحماية من التتبع
 
 ```bash
-python3 tiktok_osint_advanced.py -u selcherbny --tor
+python3 tiktok_osint_advanced.py -u username --tor
 ```
 
 - `--tor` – استخدام Tor SOCKS5 (`127.0.0.1:9050`)
@@ -117,7 +117,7 @@ python3 tiktok_osint_advanced.py -u selcherbny --tor
 #### 3.4 استخدام Proxy (Burp Suite أو أي Proxy)
 
 ```bash
-python3 tiktok_osint_advanced.py -u selcherbny -v -p 127.0.0.1:8080
+python3 tiktok_osint_advanced.py -u username -v -p 127.0.0.1:8080
 ```
 
 - `-p 127.0.0.1:8080` – استخدام proxy  
