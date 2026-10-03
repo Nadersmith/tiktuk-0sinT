@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 
 """
-TikTok OSINT Pro - Advanced Intelligence Gathering Tool
-Version: 2.0 Professional Edition
-Author: Your Name
-License: MIT
+TikTok OSINT Pro v2.1 - Advanced Intelligence Gathering Tool
+Enhanced: browser-grade headers, rehydration-JSON parsing,
+yt-dlp fallback, cookie support, Tor via socks5.
 """
 
 import os
 import re
+import sys
 import json
 import csv
 import time
+import random
 import logging
 import argparse
 import requests
@@ -29,13 +30,12 @@ from urllib3.util.retry import Retry
 
 colorama.init(autoreset=True)
 
-VERSION = "2.0 Pro"
+VERSION = "2.1 Enhanced"
 CACHE_DB = "osint_cache.db"
 LOG_FILE = "osint_logs.txt"
-RATE_LIMIT_DELAY = 2  # seconds between requests
-REQUEST_TIMEOUT = 15
+RATE_LIMIT_DELAY = 3
+REQUEST_TIMEOUT = 30
 
-# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -46,17 +46,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== DATABASE UTILITIES ====================
+BROWSER_UAS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+]
+
+# ==================== DATABASE ====================
 
 class CacheManager:
-    """Manages local caching of profiles to avoid redundant requests"""
-    
     def __init__(self, db_path=CACHE_DB):
         self.db_path = db_path
         self.init_db()
-    
+
     def init_db(self):
-        """Initialize SQLite database"""
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS profiles (
@@ -66,9 +70,8 @@ class CacheManager:
                 )
             """)
             conn.commit()
-    
+
     def get_cached(self, username, max_age_hours=24):
-        """Get cached profile if exists and not expired"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -76,16 +79,14 @@ class CacheManager:
                 (username,)
             )
             result = cursor.fetchone()
-            
             if result:
                 data, timestamp = result
                 cache_time = datetime.fromisoformat(timestamp)
                 if datetime.now() - cache_time < timedelta(hours=max_age_hours):
                     return json.loads(data)
         return None
-    
+
     def save_cache(self, username, data):
-        """Save profile to cache"""
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO profiles (username, data) VALUES (?, ?)",
@@ -96,416 +97,392 @@ class CacheManager:
 # ==================== HTTP CLIENT ====================
 
 class OsintClient:
-    """Robust HTTP client with retry logic and proper headers"""
-    
-    def __init__(self, proxy=None, use_tor=False):
+    """Browser-fingerprinted HTTP client with cookie + proxy support."""
+
+    def __init__(self, proxy=None, use_tor=False, cookies_file=None):
         self.session = requests.Session()
         self.proxy = proxy
         self.use_tor = use_tor
+        self.cookies_file = cookies_file
         self.setup_session()
-    
+
     def setup_session(self):
-        """Setup session with retry strategy"""
         retry_strategy = Retry(
-            total=3,
-            backoff_factor=1,
+            total=2,
+            backoff_factor=2,
             status_forcelist=[429, 500, 502, 503, 504],
+            raise_on_status=False,
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
-        
-        # Setup Tor if requested
+
+        self.session.headers.update({
+            "User-Agent": random.choice(BROWSER_UAS),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "DNT": "1",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "sec-ch-ua": '"Chromium";v="126", "Google Chrome";v="126", "Not-A.Brand";v="99"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+        })
+
         if self.use_tor:
             self.session.proxies = {
-                "http": "socks5://127.0.0.1:9050",
-                "https": "socks5://127.0.0.1:9050"
+                "http": "socks5h://127.0.0.1:9050",
+                "https": "socks5h://127.0.0.1:9050",
             }
-            logger.info("Tor proxy activated")
+            logger.info("Tor proxy activated (socks5h://127.0.0.1:9050)")
         elif self.proxy:
-            self.session.proxies = {
-                "http": self.proxy,
-                "https": self.proxy
-            }
+            self.session.proxies = {"http": self.proxy, "https": self.proxy}
             logger.info(f"Proxy set to: {self.proxy}")
-    
+
+        if self.cookies_file and os.path.exists(self.cookies_file):
+            try:
+                from http.cookiejar import MozillaCookieJar
+                jar = MozillaCookieJar(self.cookies_file)
+                jar.load(ignore_discard=True, ignore_expires=True)
+                self.session.cookies.update(jar)
+                logger.info(f"Cookies loaded from: {self.cookies_file}")
+            except Exception as e:
+                logger.warning(f"Could not load cookies: {e}")
+
     def get(self, url, headers=None):
-        """Make GET request with proper headers"""
-        default_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache"
-        }
+        h = dict(self.session.headers)
         if headers:
-            default_headers.update(headers)
-        
+            h.update(headers)
         try:
-            response = self.session.get(url, headers=default_headers, timeout=REQUEST_TIMEOUT)
-            response.raise_for_status()
+            response = self.session.get(url, headers=h, timeout=REQUEST_TIMEOUT)
             return response
+        except requests.exceptions.ProxyError as e:
+            logger.error(f"Proxy error ({url}): {e} - check Tor/proxy is running")
+            return None
+        except requests.exceptions.SSLError as e:
+            logger.error(f"TLS error ({url}): {e} - TikTok may be blocking your IP/fingerprint")
+            return None
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"Connection failed ({url}): {e}")
+            return None
+        except requests.exceptions.Timeout:
+            logger.error(f"Timeout ({url}) after {REQUEST_TIMEOUT}s")
+            return None
         except requests.exceptions.RequestException as e:
             logger.error(f"Request failed for {url}: {e}")
             return None
 
-# ==================== DATA EXTRACTION ====================
+# ==================== EXTRACTION ====================
 
 class TikTokExtractor:
-    """Extract information from TikTok profiles"""
-    
     def __init__(self, client):
         self.client = client
-    
-    def extract_from_url(self, username):
-        """Extract profile information from TikTok URL"""
+
+    def extract(self, username):
+        """Try direct scrape first, fall back to yt-dlp."""
+        data = self._scrape(username)
+        if not data:
+            data = self._fetch_ytdlp(username)
+        if data:
+            data["username"] = username
+            data["profile_url"] = f"https://www.tiktok.com/@{username}"
+            data["scraped_at"] = datetime.now().isoformat()
+        return data
+
+    # ---- Method 1: parse embedded rehydration JSON ----
+    def _scrape(self, username):
         url = f"https://www.tiktok.com/@{username}"
-        
         logger.info(f"Fetching profile: {username}")
-        response = self.client.get(url)
-        
-        if not response:
+        resp = self.client.get(url)
+        if not resp:
             return None
-        
-        if response.status_code != 200:
-            logger.warning(f"HTTP {response.status_code} for {username}")
+
+        if resp.status_code in (403, 404):
+            logger.warning(f"HTTP {resp.status_code} for @{username} (blocked or not found)")
             return None
-        
-        soup = BeautifulSoup(response.text, "html.parser")
-        
-        profile_data = {
-            "username": username,
-            "profile_url": url,
-            "scraped_at": datetime.now().isoformat()
-        }
-        
-        # Extract from meta tags
-        profile_data.update(self._extract_meta_tags(soup))
-        
-        # Extract bio info
-        profile_data.update(self._extract_bio_info(soup))
-        
-        # Extract structured data
-        profile_data.update(self._extract_json_ld(soup))
-        
-        # Extract social links from bio
-        profile_data["social_links"] = self._extract_links(soup)
-        
-        return profile_data
-    
-    def _extract_meta_tags(self, soup):
-        """Extract information from meta tags"""
+
+        if "captcha" in resp.text.lower() or "verify" in resp.url.lower():
+            logger.warning("TikTok served a captcha/verify page - IP is likely flagged. Use Tor or a proxy.")
+            return None
+
+        soup = BeautifulSoup(resp.text, "html.parser")
         data = {}
-        
-        # Open Graph tags
-        og_tags = {
-            "og:title": "display_name",
-            "og:description": "bio",
-            "og:image": "avatar_url"
-        }
-        
-        for meta_name, key in og_tags.items():
-            tag = soup.find("meta", property=meta_name)
-            if tag and tag.get("content"):
-                data[key] = tag.get("content")
-        
-        return data
-    
-    def _extract_bio_info(self, soup):
-        """Extract information from bio section"""
-        data = {}
-        
-        # Look for verification badge
-        data["verified"] = bool(soup.find("svg", {"data-e2e": "verified"}))
-        
-        # Extract follower/following counts from JSON-LD or structured data
-        scripts = soup.find_all("script", type="application/ld+json")
-        for script in scripts:
+
+        script = soup.find("script", id="__UNIVERSAL_DATA_FOR_REHYDRATION__")
+        if script and script.string:
             try:
-                json_data = json.loads(script.string)
-                if isinstance(json_data, dict):
-                    if "interactionStatistic" in json_data:
-                        for stat in json_data["interactionStatistic"]:
-                            if "UserFollows" in stat.get("interactionType", ""):
-                                data["followers"] = stat.get("userInteractionCount")
-                            elif "UserLikes" in stat.get("interactionType", ""):
-                                data["likes"] = stat.get("userInteractionCount")
-            except:
-                continue
-        
-        return data
-    
-    def _extract_json_ld(self, soup):
-        """Extract JSON-LD structured data"""
-        data = {}
-        
-        scripts = soup.find_all("script", type="application/ld+json")
-        for script in scripts:
-            try:
-                json_data = json.loads(script.string)
-                if isinstance(json_data, dict) and json_data.get("@type") == "Person":
-                    data["name"] = json_data.get("name")
-                    data["description"] = json_data.get("description")
-                    data["image"] = json_data.get("image")
-            except:
-                continue
-        
-        return data
-    
-    def _extract_links(self, soup):
-        """Extract external links from profile"""
-        links = []
-        
-        # Find all links in the page
-        all_links = soup.find_all("a", href=True)
-        
-        excluded_domains = ["tiktok.com", "instagram.com", "twitter.com", "facebook.com", "t.co", "bit.ly"]
-        
-        for link in all_links:
-            href = link.get("href", "")
-            if href.startswith("http"):
-                domain = urlparse(href).netloc
-                if not any(exc in domain for exc in excluded_domains):
-                    links.append({
-                        "text": link.get_text(strip=True),
-                        "url": href
-                    })
-        
-        return links[:5]  # Limit to 5 links
-    
-    def extract_email_phone(self, text):
-        """Extract email and phone from text (with better patterns)"""
-        data = {}
-        
-        # Email pattern
-        emails = re.findall(
-            r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
-            text
-        )
-        data["emails"] = list(set(emails)) if emails else []
-        
-        # Phone pattern (international)
-        phones = re.findall(
-            r'(?:\+?1[-.\s]?)?\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})\b',
-            text
-        )
-        data["phones"] = [''.join(p) for p in phones] if phones else []
-        
-        return data
+                raw = json.loads(script.string)
+                scope = raw.get("__DEFAULT_SCOPE__", {})
+                user_detail = scope.get("webapp.user-detail", {})
+                user_info = user_detail.get("userInfo") or {}
+                user = user_info.get("user") or {}
+                stats = user_info.get("stats") or {}
+                stats_v2 = user_info.get("statsV2") or {}
+
+                def pick(*vals):
+                    for v in vals:
+                        if v is not None and v != "":
+                            return v
+                    return None
+
+                data.update({
+                    "user_id": pick(user.get("id"), user.get("uid")),
+                    "nickname": pick(user.get("nickname")),
+                    "bio": pick(user.get("signature")),
+                    "verified": bool(user.get("verified")),
+                    "private": bool(user.get("privateAccount")),
+                    "region": pick(user.get("region")),
+                    "language": pick(user.get("language")),
+                    "avatar_url": pick(user.get("avatarLarger"), user.get("avatarMedium")),
+                    "followers": pick(stats_v2.get("followerCount"), stats.get("followerCount")),
+                    "following": pick(stats_v2.get("followingCount"), stats.get("followingCount")),
+                    "likes": pick(stats_v2.get("heartCount"), stats.get("heartCount")),
+                    "videos": pick(stats_v2.get("videoCount"), stats.get("videoCount")),
+                })
+
+                ct = user.get("createTime")
+                if ct:
+                    try:
+                        data["account_created"] = datetime.fromtimestamp(int(ct)).isoformat()
+                    except Exception:
+                        pass
+
+                bio_link = user.get("bioLink") or {}
+                if bio_link.get("link"):
+                    data["bio_link"] = bio_link["link"]
+
+                if user_detail.get("statusMsg") and not user:
+                    logger.warning(f"TikTok API status: {user_detail['statusMsg']}")
+            except json.JSONDecodeError:
+                logger.warning("Could not parse rehydration JSON")
+
+        # Meta tags fallback
+        if not data.get("nickname"):
+            og = soup.find("meta", property="og:title")
+            if og and og.get("content"):
+                data["nickname"] = og["content"]
+        if not data.get("bio"):
+            og = soup.find("meta", property="og:description")
+            if og and og.get("content"):
+                data["bio"] = og["content"]
+        if not data.get("avatar_url"):
+            og = soup.find("meta", property="og:image")
+            if og and og.get("content"):
+                data["avatar_url"] = og["content"]
+
+        # Public bio email/phone extraction (only what the user published)
+        if data.get("bio"):
+            found = self.extract_contact_from_text(data["bio"])
+            if found.get("emails"):
+                data["public_emails_in_bio"] = found["emails"]
+            if found.get("phones"):
+                data["public_phones_in_bio"] = found["phones"]
+
+        return data if data.get("user_id") or data.get("nickname") else None
+
+    # ---- Method 2: yt-dlp fallback ----
+    def _fetch_ytdlp(self, username):
+        try:
+            import yt_dlp
+        except ImportError:
+            return None
+        url = f"https://www.tiktok.com/@{username}"
+        logger.info("Trying yt-dlp fallback...")
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "noplaylist": True,
+            "socket_timeout": REQUEST_TIMEOUT,
+            "retries": 3,
+        }
+        if self.client.use_tor:
+            opts["proxy"] = "socks5://127.0.0.1:9050"
+        elif self.client.proxy:
+            opts["proxy"] = self.client.proxy
+
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            if not info:
+                return None
+            return {
+                "user_id": info.get("channel_id") or info.get("uploader_id"),
+                "nickname": info.get("uploader") or info.get("title"),
+                "bio": info.get("description"),
+                "followers": info.get("channel_follower_count"),
+                "avatar_url": info.get("uploader_avatar") or info.get("thumbnail"),
+                "source": "yt-dlp",
+            }
+        except Exception as e:
+            logger.warning(f"yt-dlp fallback failed: {e}")
+            return None
+
+    @staticmethod
+    def extract_contact_from_text(text):
+        emails = re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b', text)
+        phones = re.findall(r'(?:\+\d{1,3}[\s-]?)?(?:\d[\s-]?){9,14}', text)
+        return {
+            "emails": sorted(set(emails)),
+            "phones": sorted(set(p.strip() for p in phones if len(re.sub(r'\D', '', p)) >= 9)),
+        }
 
 # ==================== REPORTING ====================
 
 class ReportGenerator:
-    """Generate reports in multiple formats"""
-    
     @staticmethod
     def to_json(data, output_file):
-        """Export to JSON"""
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
         logger.info(f"JSON report saved: {output_file}")
-    
+
     @staticmethod
     def to_csv(data_list, output_file):
-        """Export to CSV"""
         if not data_list:
             return
-        
-        keys = data_list[0].keys()
+        keys = sorted({k for row in data_list for k in row.keys()})
         with open(output_file, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=keys)
+            writer = csv.DictWriter(f, fieldnames=keys, extrasaction='ignore')
             writer.writeheader()
-            writer.writerows(data_list)
+            for row in data_list:
+                writer.writerow({k: json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else v for k, v in row.items()})
         logger.info(f"CSV report saved: {output_file}")
-    
+
     @staticmethod
     def to_html(data_list, output_file):
-        """Export to HTML report"""
-        html = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <title>TikTok OSINT Report</title>
-            <style>
-                body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-                .container { max-width: 1200px; margin: 0 auto; }
-                h1 { color: #ff0050; }
-                .profile { background: white; padding: 20px; margin: 10px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-                .field { margin: 10px 0; }
-                .label { font-weight: bold; color: #333; }
-                .value { color: #666; word-break: break-all; }
-                table { width: 100%; border-collapse: collapse; }
-                th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
-                th { background-color: #ff0050; color: white; }
-                tr:nth-child(even) { background-color: #f9f9f9; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>🎵 TikTok OSINT Report</h1>
-                <p>Generated: {}</p>
-        """.format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        
-        for profile in data_list:
-            html += """
-                <div class="profile">
-                    <h2>@{}</h2>
-            """.format(profile.get("username", "Unknown"))
-            
-            for key, value in profile.items():
-                if key not in ["username", "scraped_at"] and value:
-                    if isinstance(value, list):
-                        value = ", ".join([str(v) for v in value])
-                    html += f"""
-                    <div class="field">
-                        <span class="label">{key.replace('_', ' ').title()}:</span>
-                        <span class="value">{value}</span>
-                    </div>
-                    """
-            
+        html = f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>TikTok OSINT Report</title>
+<style>
+body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
+.container {{ max-width: 1100px; margin: 0 auto; }}
+h1 {{ color: #ff0050; }}
+.profile {{ background: white; padding: 20px; margin: 10px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+.field {{ margin: 8px 0; }}
+.label {{ font-weight: bold; color: #333; }}
+.value {{ color: #666; word-break: break-all; }}
+img.avatar {{ max-width: 120px; border-radius: 50%; }}
+</style></head><body><div class="container">
+<h1>TikTok OSINT Report</h1>
+<p>Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+"""
+        for p in data_list:
+            html += f'<div class="profile"><h2>@{p.get("username", "Unknown")}</h2>'
+            if p.get("avatar_url"):
+                html += f'<img class="avatar" src="{p["avatar_url"]}" alt="avatar">'
+            for key, value in p.items():
+                if key in ("username", "avatar_url") or value in (None, "", []):
+                    continue
+                if isinstance(value, (list, dict)):
+                    value = json.dumps(value, ensure_ascii=False)
+                html += f'<div class="field"><span class="label">{key.replace("_", " ").title()}:</span> <span class="value">{value}</span></div>'
             html += "</div>"
-        
-        html += """
-            </div>
-        </body>
-        </html>
-        """
-        
+        html += "</div></body></html>"
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(html)
         logger.info(f"HTML report saved: {output_file}")
 
-# ==================== MAIN APPLICATION ====================
+# ==================== MAIN APP ====================
 
 class TikTokOsintPro:
-    """Main application class"""
-    
-    def __init__(self, proxy=None, use_tor=False, verbose=False):
-        self.client = OsintClient(proxy=proxy, use_tor=use_tor)
+    def __init__(self, proxy=None, use_tor=False, cookies_file=None, verbose=False):
+        self.client = OsintClient(proxy=proxy, use_tor=use_tor, cookies_file=cookies_file)
         self.extractor = TikTokExtractor(self.client)
         self.cache = CacheManager()
         self.verbose = verbose
-    
+
     def investigate_user(self, username, use_cache=True):
-        """Investigate a single TikTok user"""
-        
-        # Check cache first
+        username = username.lstrip("@").strip()
         if use_cache:
             cached = self.cache.get_cached(username)
             if cached:
                 logger.info(f"Using cached data for: {username}")
                 return cached
-        
-        # Extract fresh data
-        profile = self.extractor.extract_from_url(username)
-        
+        profile = self.extractor.extract(username)
         if profile:
-            # Save to cache
             self.cache.save_cache(username, profile)
-        
-        # Add rate limiting
-        time.sleep(RATE_LIMIT_DELAY)
-        
+        time.sleep(RATE_LIMIT_DELAY + random.uniform(0, 2))
         return profile
-    
+
     def investigate_batch(self, usernames, use_cache=True):
-        """Investigate multiple users"""
         results = []
-        
         for i, username in enumerate(usernames, 1):
-            print(f"\n{Fore.CYAN}[{i}/{len(usernames)}] Investigating: @{username}")
+            print(f"\n{Fore.CYAN}[{i}/{len(usernames)}] Investigating: @{username.lstrip('@')}")
             profile = self.investigate_user(username, use_cache)
-            
             if profile:
                 results.append(profile)
                 self._display_profile(profile)
             else:
                 print(f"{Fore.RED}[-] Failed to retrieve profile")
-        
         return results
-    
+
     def _display_profile(self, profile):
-        """Display profile information in terminal"""
         print(f"\n{Fore.GREEN}{'='*60}")
         print(f"{Fore.CYAN}Profile: @{profile.get('username', 'Unknown')}")
         print(f"{Fore.GREEN}{'='*60}")
-        
-        display_fields = [
-            ("Display Name", "display_name"),
-            ("Bio", "bio"),
-            ("Verified", "verified"),
-            ("Followers", "followers"),
-            ("Likes", "likes"),
-            ("Avatar", "avatar_url"),
-            ("Social Links", "social_links"),
-            ("Scraped At", "scraped_at")
-        ]
-        
-        for label, key in display_fields:
+        order = ["user_id", "nickname", "bio", "verified", "private", "followers",
+                 "following", "likes", "videos", "region", "language",
+                 "account_created", "bio_link", "public_emails_in_bio",
+                 "public_phones_in_bio", "avatar_url", "source", "scraped_at"]
+        for key in order:
             value = profile.get(key)
-            if value:
-                if isinstance(value, list):
-                    value = "\n  - " + "\n  - ".join([str(v) for v in value])
-                print(f"{Fore.YELLOW}{label}: {Fore.WHITE}{value}")
-        
+            if value not in (None, "", []):
+                print(f"{Fore.YELLOW}{key.replace('_',' ').title()}: {Fore.WHITE}{value}")
         print(f"{Fore.GREEN}{'='*60}\n")
 
 def banner():
-    """Display ASCII banner"""
     print(f"""{Fore.CYAN}
     ╔══════════════════════════════════════════════════════════╗
-    ║        TikTok OSINT Pro v{VERSION}                   ║
+    ║        TikTok OSINT Pro v{VERSION}                 ║
     ║      Advanced Intelligence Gathering Tool              ║
     ║                                                          ║
     ║  Professional • Fast • Reliable • Privacy-Focused       ║
     ╚══════════════════════════════════════════════════════════╝
-    {Style.RESET_ALL}
-    """)
+    {Style.RESET_ALL}""")
 
 def parse_arguments():
-    """Parse command line arguments"""
     parser = argparse.ArgumentParser(
         description="TikTok OSINT Pro - Advanced profile investigation tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Single user investigation
-  python3 tiktok_osint_pro.py -u username
-  
-  # Batch investigation with report
-  python3 tiktok_osint_pro.py -f usernames.txt -o report.json
-  
-  # Using Tor for privacy
-  python3 tiktok_osint_pro.py -u username --tor
-  
-  # Generate HTML report
-  python3 tiktok_osint_pro.py -u username --html report.html
+  python3 tiktok_osint_pro_v21.py -u axia.selsherbny
+  python3 tiktok_osint_pro_v21.py -u axia.selsherbny --tor -o report.json --html report.html
+  python3 tiktok_osint_pro_v21.py -u axia.selsherbny -p http://127.0.0.1:8080
+  python3 tiktok_osint_pro_v21.py -f usernames.txt -o report.csv
+  python3 tiktok_osint_pro_v21.py -u axia.selsherbny -c cookies.txt
         """
     )
-    
     parser.add_argument("-u", "--username", help="Single TikTok username")
     parser.add_argument("-f", "--file", help="File with usernames (one per line)")
-    parser.add_argument("-o", "--output", help="Output file (json/csv)")
-    parser.add_argument("--html", help="Generate HTML report")
-    parser.add_argument("-p", "--proxy", help="Proxy server (http://ip:port)")
-    parser.add_argument("--tor", action="store_true", help="Use Tor SOCKS5 proxy")
+    parser.add_argument("-o", "--output", help="Output file (.json or .csv)")
+    parser.add_argument("--html", help="Generate HTML report file")
+    parser.add_argument("-p", "--proxy", help="Proxy (http://ip:port or socks5://ip:port)")
+    parser.add_argument("--tor", action="store_true", help="Use Tor (socks5h://127.0.0.1:9050)")
+    parser.add_argument("-c", "--cookies", help="Netscape-format cookies.txt from browser")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
-    parser.add_argument("--no-cache", action="store_true", help="Don't use cached data")
-    
+    parser.add_argument("--no-cache", action="store_true", help="Ignore cache")
     return parser.parse_args()
 
 def main():
-    """Main function"""
     banner()
     args = parse_arguments()
-    
-    # Initialize OSINT tool
-    osint = TikTokOsintPro(proxy=args.proxy, use_tor=args.tor, verbose=args.verbose)
-    
-    usernames = []
-    
-    # Get usernames
+
+    if args.tor:
+        try:
+            import socks  # noqa: F401  (requests[socks])
+        except ImportError:
+            print(f"{Fore.RED}[-] Tor requires: sudo pip3 install requests[socks]")
+            print(f"{Fore.YELLOW}[i] And make sure Tor service is running: sudo service tor start")
+            sys.exit(1)
+
+    osint = TikTokOsintPro(proxy=args.proxy, use_tor=args.tor,
+                           cookies_file=args.cookies, verbose=args.verbose)
+
     if args.username:
         usernames = [args.username]
     elif args.file:
@@ -514,28 +491,27 @@ def main():
                 usernames = [line.strip() for line in f if line.strip()]
         except FileNotFoundError:
             print(f"{Fore.RED}[-] File not found: {args.file}")
-            return
+            sys.exit(1)
     else:
-        print(f"{Fore.RED}[-] Please provide username (-u) or file (-f)")
-        return
-    
-    # Investigate users
+        print(f"{Fore.RED}[-] Provide username (-u) or file (-f)")
+        sys.exit(1)
+
     results = osint.investigate_batch(usernames, use_cache=not args.no_cache)
-    
-    # Generate reports
+
     if results:
         if args.output:
             if args.output.endswith('.csv'):
                 ReportGenerator.to_csv(results, args.output)
             else:
                 ReportGenerator.to_json(results, args.output)
-        
         if args.html:
             ReportGenerator.to_html(results, args.html)
-        
-        print(f"\n{Fore.GREEN}[+] Investigation complete! Found {len(results)} profiles")
+        print(f"\n{Fore.GREEN}[+] Done! Retrieved {len(results)} profile(s)")
     else:
         print(f"\n{Fore.RED}[-] No profiles retrieved")
+        print(f"{Fore.YELLOW}[i] Likely causes: your IP is blocked by TikTok, or no Tor/proxy running.")
+        print(f"{Fore.YELLOW}[i] Try: --tor   |   -p http://PROXY:PORT   |   -c cookies.txt")
+        sys.exit(2)
 
 if __name__ == "__main__":
     main()
